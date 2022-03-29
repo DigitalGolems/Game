@@ -5,26 +5,25 @@ pragma solidity 0.8.10;
 
 import "../../Utils/SafeMath.sol";
 import "../../Utils/Owner.sol";
-import "../Inventory/Inventory.sol";
-import "../Assets.sol";
-import "./Access.sol";
-import "../Rent/Rent.sol";
-import "../../Digibytes/Digibytes.sol";
-import "../../DigitalGolems/DigitalGolems.sol";
-import "../Psychospheres.sol";
+import "../Interfaces/IInventory.sol";
+import "../Rent/IRent.sol";
+import "../../Digibytes/Interfaces/IBEP20.sol";
+import "../../DigitalGolems/Interfaces/ICard.sol";
+import "../Interfaces/IPsychospheres.sol";
+import "../Interfaces/IAsset.sol";
 
-contract Session is Access {
+contract Session is Owner{
     using SafeMath for uint;
     using SafeMath32 for uint32;
     using SafeMath16 for uint16;
     //changing price isOwner
     uint256 pricePayoff = 10 * 10**18;
-    Digibytes public DBT;
-    Psychospheres public psychospheres;
-    DigitalGolems public DIG;
-    Inventory public inventory;
-    Assets public assets;
-    Rent public rent;
+    IBEP20 public DBT;
+    IPsychospheres public psychospheres;
+    ICard public card;
+    IInventory public inventory;
+    IAsset public assets;
+    IRent public rent;
     //counts card wins
     mapping (uint256 => uint32) public cardIDToWin;
     //counts card loses
@@ -35,68 +34,54 @@ contract Session is Access {
     mapping (address => uint32) public userToLose;
     //checks if user payoffed to winner
     mapping (address => bool) private userPayoff;
-    
-    event FightingResult(address winner, uint256 winnerCard, address loser, uint256 loserCard);
-    
+    mapping (address => uint256) private userPayoffAmount;
+
+    event FightingResult(address winner, uint256 winnerCard, address loser, uint256 loserCard, bool payoff);
+
     //setting addresses to contracts
     function setDBT(address _DBT) public isOwner {
-        DBT = Digibytes(_DBT);
-    }
-
-    function setDIG(address _DIG) public isOwner {
-        DIG = DigitalGolems(_DIG);
+        DBT = IBEP20(_DBT);
     }
 
     function setInventory(address _inventory) public isOwner {
-        inventory = Inventory(_inventory);
+        inventory = IInventory(_inventory);
     }
 
     function setAssets(address _assets) public isOwner {
-        assets = Assets(_assets);
+        assets = IAsset(_assets);
     }
 
     function setPsycho(address _psycho) public isOwner {
-        psychospheres = Psychospheres(_psycho);
+        psychospheres = IPsychospheres(_psycho);
     }
 
     function setRent(address _rent) public isOwner {
-        rent = Rent(_rent);
+        rent = IRent(_rent);
     }
 
-    //validation is here because we want only winner to use this func
-    //also winner cant use this function multiple times after using
-    //because we sign with amount of user wins that increase after writing result
-    function PVPResultWinner(
-        address winner, 
-        uint256 winnerCard, 
-        address loser, 
-        uint256 loserCard,
-        uint8 _v, 
-        bytes32 _r, 
-        bytes32 _s
-    ) 
-    public 
-    onlyValidResult(_v, _r, _s, uint256(userToWin[winner]))
-    {
-        require(
-            (DIG.ownerOf(winnerCard) == winner)
-            ||
-            (rent.getUserRenter(rent.getItemIDByCardID(winnerCard)) == msg.sender),
-            "Not winner card");
-        require(
-            (DIG.ownerOf(loserCard) == loser)
-            ||
-            (rent.getUserRenter(rent.getItemIDByCardID(loserCard)) == msg.sender),
-            "Not loser card");
+    function setCard(address _card) public isOwner {
+        card = ICard(_card);
+    }
+
+    //calls if winner didnt called his function
+    function PVPResultOwner(
+        address winner,
+        uint256 winnerCard,
+        address loser,
+        uint256 loserCard
+    ) public isOwner isUserCard(winnerCard, winner) isUserCard(loserCard, loser){
         if (userPayoff[loser] != true) {
             _recordResult(winner, winnerCard, loser, loserCard);
             _takeAssets(winner, loser);
             _takeSomeFromInventory(winner, loser, winnerCard, loserCard);
+            emit FightingResult(winner, winnerCard, loser, loserCard, false);
         } else {
             _recordResult(winner, winnerCard, loser, loserCard);
+            DBT.transfer(winner, userPayoffAmount[loser]);
             userPayoff[loser] = false;
+            userPayoffAmount[loser] = userPayoffAmount[loser] - pricePayoff;
+            emit FightingResult(winner, winnerCard, loser, loserCard, true);
         }
-        emit FightingResult(winner, winnerCard, loser, loserCard);
     }
 
     function _recordResult(address _winner, uint256 _winnerCard, address _loser, uint256 _loserCard) private {
@@ -114,7 +99,7 @@ contract Session is Access {
 
     function _takeSomeFromInventory(address _winner, address _loser, uint256 _winnerCard, uint256 _loserCard) private {
         inventory.loseFromInventory(
-            _winner, 
+            _winner,
             _loser,
             cardIDToWin[_winnerCard],
             cardIDToLose[_loserCard],
@@ -126,15 +111,23 @@ contract Session is Access {
     //for session
     //decrease each abilitity on one
     function decreaseAbility(uint256 _ID) private {
-        DIG.decreaseNumAbilityAfterSession(_ID);
+        card.decreaseNumAbilityAfterSession(_ID);
     }
 
     //loser can payoff duel
-    function payoff(address whoPays) public {
-        require(DBT.balanceOf(whoPays) >= pricePayoff, "Not enough DBT");
-        require(DBT.allowance(whoPays, address(this)) >= pricePayoff, "Not allowance DBT");
-        userPayoff[whoPays] = true;
-        DBT.transferFrom(whoPays, address(this), pricePayoff);
+    function payoff() public {
+        DBT.transferFrom(msg.sender, address(this), pricePayoff);
+        userPayoffAmount[msg.sender] = userPayoffAmount[msg.sender] + pricePayoff;
+        userPayoff[msg.sender] = true;
+    }
+
+    function changePayoffPrice(uint256 newPrice) public isOwner {
+        pricePayoff = newPrice;
+    }
+
+    function getUserPayoff(address user) public view returns(bool _payoff, uint256 _amount) {
+        _payoff = userPayoff[user];
+        _amount = userPayoffAmount[user];
     }
 
     function getCardIDToWin(uint256 ID) public view returns(uint32) {
@@ -142,7 +135,7 @@ contract Session is Access {
     }
 
     function getCardIDToLose(uint256 ID) public view returns(uint32) {
-        return cardIDToLose[ID]; 
+        return cardIDToLose[ID];
     }
 
     function getUserToWin(address user) public view returns(uint32) {
@@ -161,15 +154,7 @@ contract Session is Access {
         uint8[] memory psychoAmount, //array because we have diffrent soil, so each ID means soil
         uint256 cardID,
         address user
-    ) external{
-        require(
-            (DIG.ownerOf(cardID) == user)
-            ||
-            (rent.getUserRenter(rent.getItemIDByCardID(cardID)) == user),
-            "Not yours card");
-        require(things.length >= 5, "Need more Things");
-        require(resources.length >= 4, "Need more Resources");
-        require(augmentations.length >= 9, "Need more Augmentations");
+    ) external isOwner isUserCard(cardID, user) {
         inventory.addThings(
             things,
             user
@@ -184,6 +169,64 @@ contract Session is Access {
         );
         psychospheres.addPsychosphere(user, psychoAmount);
         decreaseAbility(cardID);
+    }
+
+    function sessionDecreaseAbility(uint256 cardID, address player) external isOwner isUserCard(cardID, player) {
+        decreaseAbility(cardID);
+    }
+
+    function sessionPsychospheresResult(
+        uint8 amount,
+        uint32 soil,
+        address user
+    ) external isOwner {
+        psychospheres.addOnePsychosphere(user, soil, amount);
+    }
+
+    function sessionThingsResult(
+        uint16 ID,
+        uint16 amount,
+        address user
+    ) external isOwner {
+        inventory.changeAmountOfOneThing(
+            ID,
+            amount,
+            user
+        );
+    }
+    function sessionResourcesResult(
+        uint16 ID,
+        uint16 amount,
+        address user
+    ) external isOwner {
+        inventory.changeAmountOfOneResource(
+            ID,
+            amount,
+            user
+        );
+    }
+    function sessionAugmentResult(
+        uint16 ID,
+        uint16 amount,
+        address user
+    ) external isOwner {
+        inventory.changeAmountOfOneAugmentation(
+            ID,
+            amount,
+            user
+        );
+    }
+
+    modifier isUserCard(uint256 id, address player) {
+      bool cardRentExist;
+      uint256 cardItemID;
+      (cardItemID, cardRentExist) = rent.getItemIDByCardID(id);
+      if (cardRentExist) {
+          require(rent.getUserRenter(cardItemID) == player, "Not user card");
+      } else {
+          require(card.cardOwner(id) == player, "Not user card");
+      }
+      _;
     }
 
 }
